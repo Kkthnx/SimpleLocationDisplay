@@ -1,8 +1,6 @@
 ﻿using StardewModdingAPI;
 using StardewModdingAPI.Events;
 using StardewValley;
-using System;
-using System.Collections.Generic;
 
 namespace SimpleLocationDisplay
 {
@@ -16,6 +14,7 @@ namespace SimpleLocationDisplay
         private string? lastLocationName;
         private readonly Dictionary<string, string> translationCache = new();
         private ConfigMenu? configMenu;
+        private bool isWarpedSubscribed;
 
         /// <summary>
         /// Entry point for the mod, initializing event subscriptions and configuration.
@@ -30,8 +29,15 @@ namespace SimpleLocationDisplay
                 config.NotificationDuration = loadedConfig.NotificationDuration;
             }
 
+            // Game state events
             helper.Events.GameLoop.GameLaunched += OnGameLaunched;
+            helper.Events.GameLoop.SaveLoaded += OnSaveLoaded;
+
+            // Player events
             helper.Events.Player.Warped += OnWarped;
+            isWarpedSubscribed = true;
+
+            // Cleanup events
             helper.Events.GameLoop.ReturnedToTitle += OnReturnedToTitle;
         }
 
@@ -48,6 +54,22 @@ namespace SimpleLocationDisplay
                     configMenu = new ConfigMenu(this, config, api);
                     configMenu.SetupConfigUI();
                 }
+            }
+        }
+
+        private void OnSaveLoaded(object? sender, SaveLoadedEventArgs e)
+        {
+            // Clear translation cache to handle new save's language or modded locations
+            translationCache.Clear();
+
+            // Ensure SaveLoaded is subscribed for subsequent save loads
+            Helper.Events.GameLoop.SaveLoaded += OnSaveLoaded;
+
+            // Subscribe to Warped if not already subscribed
+            if (!isWarpedSubscribed)
+            {
+                Helper.Events.Player.Warped += OnWarped;
+                isWarpedSubscribed = true;
             }
         }
 
@@ -117,7 +139,9 @@ namespace SimpleLocationDisplay
         private void OnReturnedToTitle(object? sender, ReturnedToTitleEventArgs e)
         {
             Helper.Events.Player.Warped -= OnWarped;
+            isWarpedSubscribed = false;
             Helper.Events.GameLoop.GameLaunched -= OnGameLaunched;
+            Helper.Events.GameLoop.SaveLoaded -= OnSaveLoaded;
             Helper.Events.GameLoop.ReturnedToTitle -= OnReturnedToTitle;
         }
     }
