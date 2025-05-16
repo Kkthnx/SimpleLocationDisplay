@@ -1,148 +1,137 @@
 ﻿using StardewModdingAPI;
 using StardewModdingAPI.Events;
 using StardewValley;
+using System.Text.RegularExpressions;
+using System.Collections.Generic;
 
 namespace SimpleLocationDisplay
 {
-    /// <summary>
-    /// A mod that displays the current location name as a HUD notification with translation support.
-    /// </summary>
     public class ModEntry : Mod
     {
-        private readonly ModConfig config = new ModConfig();
+        private ModConfig config = new ModConfig();
         private HUDMessage? lastLocationMessage;
         private string? lastLocationName;
-        private readonly Dictionary<string, string> translationCache = new();
-        private ConfigMenu? configMenu;
-        private bool isWarpedSubscribed;
 
-        /// <summary>
-        /// Entry point for the mod, initializing event subscriptions and configuration.
-        /// </summary>
-        /// <param name="helper">SMAPI mod helper for events and utilities.</param>
+        private static readonly Regex GuidRegex = new Regex(
+            @"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase
+        );
+
+        private static readonly Dictionary<string, string?> TranslationCache = new Dictionary<string, string?>();
+
         public override void Entry(IModHelper helper)
         {
-            // Load config, overwriting default if file exists
-            var loadedConfig = helper.ReadConfig<ModConfig>();
-            if (loadedConfig != null)
-            {
-                config.NotificationDuration = loadedConfig.NotificationDuration;
-            }
-
-            // Game state events
-            helper.Events.GameLoop.GameLaunched += OnGameLaunched;
-            helper.Events.GameLoop.SaveLoaded += OnSaveLoaded;
-
-            // Player events
+            config = helper.ReadConfig<ModConfig>() ?? new ModConfig();
             helper.Events.Player.Warped += OnWarped;
-            isWarpedSubscribed = true;
-
-            // Cleanup events
-            helper.Events.GameLoop.ReturnedToTitle += OnReturnedToTitle;
+            helper.Events.GameLoop.GameLaunched += OnGameLaunched;
+            helper.ConsoleCommands.Add("debug_location", "Prints current location details.", OnDebugLocationCommand);
         }
 
         private void OnGameLaunched(object? sender, GameLaunchedEventArgs e)
         {
-            translationCache.Clear();
-
-            // Initialize GenericModConfigMenu if available
-            if (Helper.ModRegistry.IsLoaded("spacechase0.GenericModConfigMenu"))
-            {
-                var api = Helper.ModRegistry.GetApi<IGenericModConfigMenuApi>("spacechase0.GenericModConfigMenu");
-                if (api != null)
-                {
-                    configMenu = new ConfigMenu(this, config, api);
-                    configMenu.SetupConfigUI();
-                }
-            }
-        }
-
-        private void OnSaveLoaded(object? sender, SaveLoadedEventArgs e)
-        {
-            // Clear translation cache to handle new save's language or modded locations
-            translationCache.Clear();
-
-            // Ensure SaveLoaded is subscribed for subsequent save loads
-            Helper.Events.GameLoop.SaveLoaded += OnSaveLoaded;
-
-            // Subscribe to Warped if not already subscribed
-            if (!isWarpedSubscribed)
-            {
-                Helper.Events.Player.Warped += OnWarped;
-                isWarpedSubscribed = true;
-            }
+            ConfigMenu.SetupConfigUI(this, Helper, config);
         }
 
         private void OnWarped(object? sender, WarpedEventArgs e)
         {
-            try
+            if (!config.EnableMod || e.NewLocation == null) return;
+
+            string locationName = GetLocationName(e.NewLocation);
+            if (locationName == lastLocationName) return;
+
+            if (lastLocationMessage != null && Game1.hudMessages.Contains(lastLocationMessage))
             {
-                if (e.NewLocation == null)
-                    return;
-
-                string locationName = e.NewLocation.GetDisplayName() ?? GetTranslatedOrRawName(e.NewLocation.Name);
-
-                if (locationName == Game1.content.LoadString("Strings\\UI:UnknownLocation") || locationName == "Unknown Location")
-                    LogUnknownLocationDetails(e);
-
-                if (lastLocationName == locationName)
-                    return;
-
-                if (lastLocationMessage != null && Game1.hudMessages.Contains(lastLocationMessage))
-                    Game1.hudMessages.Remove(lastLocationMessage);
-
-                lastLocationMessage = HUDMessage.ForCornerTextbox(locationName);
-                lastLocationMessage.timeLeft = config.NotificationDuration;
-                Game1.addHUDMessage(lastLocationMessage);
-                lastLocationName = locationName;
+                Game1.hudMessages.Remove(lastLocationMessage);
             }
-            catch (Exception ex)
-            {
-                Monitor.Log($"Error in OnWarped: {ex.Message}", LogLevel.Error);
-            }
+
+            lastLocationMessage = HUDMessage.ForCornerTextbox(locationName);
+            lastLocationMessage.timeLeft = config.NotificationDuration;
+            Game1.hudMessages.Add(lastLocationMessage);
+            lastLocationName = locationName;
+
+            LogDebug($"Displayed location: {locationName}");
         }
 
-        private string GetTranslatedOrRawName(string? rawName)
+        private void OnDebugLocationCommand(string command, string[] args)
         {
-            const string unknownLocation = "Unknown Location";
-            if (string.IsNullOrEmpty(rawName) || rawName.Length < 4)
-                return Game1.content.LoadString("Strings\\UI:UnknownLocation") ?? unknownLocation;
+            if (Game1.currentLocation == null)
+            {
+                Monitor.Log("No current location available.", LogLevel.Info);
+                return;
+            }
 
-            string language = Game1.content.GetCurrentLanguage().ToString();
-            string cacheKey = $"{language}.{rawName}";
+            string name = Game1.currentLocation.Name ?? "null";
+            string uniqueName = Game1.currentLocation.NameOrUniqueName ?? "null";
+            string displayName = Game1.currentLocation.GetDisplayName() ?? "null";
+            string translatedName = GetLocationName(Game1.currentLocation);
 
-            if (translationCache.TryGetValue(cacheKey, out string? translation) && !string.IsNullOrEmpty(translation))
+            Monitor.Log($"Location Debug: Name='{name}', UniqueName='{uniqueName}', DisplayName='{displayName}', TranslatedName='{translatedName}'", LogLevel.Info);
+        }
+
+        private string GetLocationName(GameLocation location)
+        {
+            string? displayName = location.GetDisplayName();
+            if (!string.IsNullOrEmpty(displayName))
+            {
+                LogDebug($"Using GetDisplayName: {displayName}");
+                return displayName;
+            }
+
+            string rawName = location.NameOrUniqueName ?? "Unknown Location";
+            string baseName = SanitizeRawName(rawName);
+            LogDebug($"GetDisplayName failed, using base name: {baseName}");
+
+            string translationKey = $"location.{baseName.Replace(" ", "_").Replace(".", "_")}";
+            if (!TranslationCache.TryGetValue(translationKey, out string? translation))
+            {
+                translation = Helper.Translation.Get(translationKey);
+                if (!string.IsNullOrEmpty(translation) && !translation.StartsWith("(no translation:"))
+                {
+                    TranslationCache[translationKey] = translation;
+                    LogDebug($"Found translation for {baseName}: {translation}");
+                    return translation;
+                }
+                else
+                {
+                    TranslationCache[translationKey] = null; // Cache "no translation" as null
+                }
+            }
+            else if (translation != null)
+            {
+                LogDebug($"Using cached translation for {baseName}: {translation}");
                 return translation;
+            }
 
-            // Sanitize name and check for translation
-            string sanitizedName = rawName.Replace(" ", "_").Replace(".", "_");
-            translation = Helper.Translation.Get($"location.{sanitizedName}") ?? rawName;
-            translationCache[cacheKey] = translation;
-
-            return translation;
+            string locationName = $"location.{baseName}";
+            LogDebug($"No translation found, using location name: {locationName}");
+            return locationName;
         }
 
-        private void LogUnknownLocationDetails(WarpedEventArgs e)
+        private string SanitizeRawName(string name)
         {
-            Monitor.Log("Unknown location detected, gathering debug info:", LogLevel.Warn);
-            Monitor.Log($"NewLocation is {(e.NewLocation == null ? "null" : "non-null")}", LogLevel.Warn);
-            Monitor.Log($"Current Location: {Game1.currentLocation?.Name ?? "None"}", LogLevel.Warn);
-            Monitor.Log($"Map Name: {Game1.currentLocation?.Map?.Id ?? "None"}", LogLevel.Warn);
-            Monitor.Log($"Player Position: X={Game1.player?.Position.X:F1}, Y={Game1.player?.Position.Y:F1}", LogLevel.Warn);
-            Monitor.Log($"Facing Direction: {Game1.player?.FacingDirection ?? -1}", LogLevel.Warn);
-            Monitor.Log($"Game Time: {Game1.timeOfDay}, Day={Game1.dayOfMonth}, Season={Game1.currentSeason}, Year={Game1.year}", LogLevel.Warn);
-            Monitor.Log($"Multiplayer: {Game1.IsMultiplayer}, IsClient={Game1.IsClient}, IsServer={Game1.IsServer}", LogLevel.Warn);
-            Monitor.Log($"Current Scene: {Game1.currentMinigame?.GetType()?.Name ?? "None"}", LogLevel.Warn);
-            Monitor.Log($"Potential Causes: {(e.NewLocation == null ? "Null location (loading screen, transition, or mod issue)" : "Location lacks GetDisplayName/Name (modded location?)")}", LogLevel.Warn);
+            if (string.IsNullOrEmpty(name))
+                return "Unknown Location";
+
+            if (name.Length > 36)
+            {
+                string potentialGuid = name.Substring(name.Length - 36);
+                if (GuidRegex.IsMatch(potentialGuid))
+                {
+                    string baseName = name.Substring(0, name.Length - 36);
+                    LogDebug($"Sanitized raw name from '{name}' to '{baseName}'");
+                    return baseName.Length < 2 ? "Unknown Location" : baseName;
+                }
+            }
+
+            return name.Length < 2 ? "Unknown Location" : name;
         }
 
-        private void OnReturnedToTitle(object? sender, ReturnedToTitleEventArgs e)
+        private void LogDebug(string message)
         {
-            Helper.Events.Player.Warped -= OnWarped;
-            isWarpedSubscribed = false;
-            Helper.Events.GameLoop.GameLaunched -= OnGameLaunched;
-            Helper.Events.GameLoop.SaveLoaded -= OnSaveLoaded;
-            Helper.Events.GameLoop.ReturnedToTitle -= OnReturnedToTitle;
+            if (config.EnableDebugLogging)
+            {
+                Monitor.Log(message, LogLevel.Debug);
+            }
         }
     }
 }
