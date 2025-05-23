@@ -8,20 +8,30 @@ namespace SimpleLocationDisplay
 {
     public class ModEntry : Mod
     {
-        private ModConfig config = new ModConfig();
+        private ModConfig config = new();
         private HUDMessage? lastLocationMessage;
         private string? lastLocationName;
 
-        private static readonly Regex GuidRegex = new Regex(
+        private static readonly Regex GuidRegex = new(
             @"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
             RegexOptions.Compiled | RegexOptions.IgnoreCase
         );
 
-        private static readonly Dictionary<string, string?> TranslationCache = new Dictionary<string, string?>();
+        private static readonly Regex MineLevelRegex = new(
+            @"^UndergroundMine(\d+)$",
+            RegexOptions.Compiled
+        );
+
+        private static readonly Regex VolcanoLevelRegex = new(
+            @"^VolcanoDungeon(\d+)$",
+            RegexOptions.Compiled
+        );
+
+        private static readonly Dictionary<string, string> TranslationCache = new();
 
         public override void Entry(IModHelper helper)
         {
-            config = helper.ReadConfig<ModConfig>() ?? new ModConfig();
+            config = Helper.ReadConfig<ModConfig>() ?? new();
             helper.Events.Player.Warped += OnWarped;
             helper.Events.GameLoop.GameLaunched += OnGameLaunched;
             helper.ConsoleCommands.Add("debug_location", "Prints current location details.", OnDebugLocationCommand);
@@ -29,15 +39,19 @@ namespace SimpleLocationDisplay
 
         private void OnGameLaunched(object? sender, GameLaunchedEventArgs e)
         {
+            TranslationCache.Clear();
+            LogDebug("Translation cache cleared on game launch.");
             ConfigMenu.SetupConfigUI(this, Helper, config);
         }
 
         private void OnWarped(object? sender, WarpedEventArgs e)
         {
-            if (!config.EnableMod || e.NewLocation == null) return;
+            if (!config.EnableMod || e.NewLocation == null)
+                return;
 
             string locationName = GetLocationName(e.NewLocation);
-            if (locationName == lastLocationName) return;
+            if (locationName == lastLocationName)
+                return;
 
             if (lastLocationMessage != null && Game1.hudMessages.Contains(lastLocationMessage))
             {
@@ -70,47 +84,144 @@ namespace SimpleLocationDisplay
 
         private string GetLocationName(GameLocation location)
         {
+            if (location == null)
+            {
+                LogDebug("Location is null, returning default.");
+                return "Unknown Location";
+            }
+
+            string translationKey = string.Empty;
+            string result = string.Empty;
+
+            // Step 1: Try GetDisplayName
             string? displayName = location.GetDisplayName();
-            if (!string.IsNullOrEmpty(displayName))
+            if (!string.IsNullOrEmpty(displayName) && !displayName.StartsWith("(no translation:"))
             {
                 LogDebug($"Using GetDisplayName: {displayName}");
                 return displayName;
             }
+            LogDebug($"GetDisplayName invalid or null: '{displayName ?? "null"}'");
 
-            string rawName = location.NameOrUniqueName ?? "Unknown Location";
-            string baseName = SanitizeRawName(rawName);
-            LogDebug($"GetDisplayName failed, using base name: {baseName}");
-
-            string translationKey = $"location.{baseName.Replace(" ", "_").Replace(".", "_")}";
-            if (!TranslationCache.TryGetValue(translationKey, out string? translation))
+            // Step 2: Try Name with translation or level handling
+            string? nameNullable = location.Name;
+            string name = nameNullable ?? string.Empty;
+            if (!string.IsNullOrEmpty(name) && name != "null")
             {
-                translation = Helper.Translation.Get(translationKey);
-                if (!string.IsNullOrEmpty(translation) && !translation.StartsWith("(no translation:"))
+                LogDebug($"Using Name: {name}");
+
+                // Handle mine levels
+                var mineLevelMatch = MineLevelRegex.Match(name);
+                if (mineLevelMatch.Success)
                 {
-                    TranslationCache[translationKey] = translation;
-                    LogDebug($"Found translation for {baseName}: {translation}");
-                    return translation;
+                    string levelNumber = mineLevelMatch.Groups[1].Value;
+                    translationKey = $"location.UndergroundMine_Level_{levelNumber}";
+                    if (TranslationCache.TryGetValue(translationKey, out string? cachedResult) && cachedResult != null)
+                    {
+                        LogDebug($"Using cached mine level translation: {cachedResult}");
+                        return cachedResult;
+                    }
+
+                    string? mineTranslation = Helper.Translation.Get("location.UndergroundMine_Level", new { level = levelNumber });
+                    LogDebug($"Raw translation for mine level {levelNumber}: '{mineTranslation ?? "null"}'");
+                    if (mineTranslation != null && !mineTranslation.StartsWith("(no translation:") && !mineTranslation.Contains("{level}"))
+                    {
+                        result = mineTranslation;
+                    }
+                    else
+                    {
+                        result = $"Underground Mine Level {levelNumber}";
+                    }
+                    TranslationCache[translationKey] = result;
+                    LogDebug($"Translated mine level {levelNumber}: {result}");
+                    return result;
+                }
+
+                // Handle volcano dungeon levels
+                var volcanoLevelMatch = VolcanoLevelRegex.Match(name);
+                if (volcanoLevelMatch.Success)
+                {
+                    string levelNumber = volcanoLevelMatch.Groups[1].Value;
+                    translationKey = $"location.VolcanoDungeon_Level_{levelNumber}";
+                    if (TranslationCache.TryGetValue(translationKey, out string? cachedResult) && cachedResult != null)
+                    {
+                        LogDebug($"Using cached volcano level translation: {cachedResult}");
+                        return cachedResult;
+                    }
+
+                    string? volcanoTranslation = Helper.Translation.Get("location.VolcanoDungeon_Level", new { level = levelNumber });
+                    LogDebug($"Raw translation for volcano level {levelNumber}: '{volcanoTranslation ?? "null"}'");
+                    if (volcanoTranslation != null && !volcanoTranslation.StartsWith("(no translation:") && !volcanoTranslation.Contains("{level}"))
+                    {
+                        result = volcanoTranslation;
+                    }
+                    else
+                    {
+                        result = $"Volcano Dungeon Level {levelNumber}";
+                    }
+                    TranslationCache[translationKey] = result;
+                    LogDebug($"Translated volcano level {levelNumber}: {result}");
+                    return result;
+                }
+
+                // Try standard translation
+                translationKey = $"location.{name.Replace(" ", "_").Replace(".", "_")}";
+                if (TranslationCache.TryGetValue(translationKey, out string? cachedTranslation) && cachedTranslation != null)
+                {
+                    LogDebug($"Using cached translation: {cachedTranslation}");
+                    return cachedTranslation;
+                }
+
+                string? translation = Helper.Translation.Get(translationKey);
+                if (translation != null && !translation.StartsWith("(no translation:"))
+                {
+                    result = translation;
                 }
                 else
                 {
-                    TranslationCache[translationKey] = null; // Cache "no translation" as null
+                    result = name;
                 }
-            }
-            else if (translation != null)
-            {
-                LogDebug($"Using cached translation for {baseName}: {translation}");
-                return translation;
+                TranslationCache[translationKey] = result;
+                LogDebug($"Translated name: {result}");
+                return result;
             }
 
-            string locationName = $"location.{baseName}";
-            LogDebug($"No translation found, using location name: {locationName}");
-            return locationName;
+            // Step 3: Fallback to sanitized UniqueName
+            string? uniqueName = location.NameOrUniqueName;
+            if (string.IsNullOrEmpty(uniqueName))
+            {
+                LogDebug("UniqueName is null or empty, using fallback.");
+                return "Unknown Location";
+            }
+
+            string sanitizedName = SanitizeRawName(uniqueName);
+            translationKey = $"location.{sanitizedName.Replace(" ", "_").Replace(".", "_")}";
+            if (TranslationCache.TryGetValue(translationKey, out string? cachedSanitized) && cachedSanitized != null)
+            {
+                LogDebug($"Using cached sanitized translation: {cachedSanitized}");
+                return cachedSanitized;
+            }
+
+            string? sanitizedTranslation = Helper.Translation.Get(translationKey);
+            if (sanitizedTranslation != null && !sanitizedTranslation.StartsWith("(no translation:"))
+            {
+                result = sanitizedTranslation;
+            }
+            else
+            {
+                result = $"location.{sanitizedName}";
+            }
+            TranslationCache[translationKey] = result;
+            LogDebug($"Translated sanitized name: {result}");
+            return result;
         }
 
         private string SanitizeRawName(string name)
         {
             if (string.IsNullOrEmpty(name))
+            {
+                LogDebug("SanitizeRawName: Input name is empty, returning default.");
                 return "Unknown Location";
+            }
 
             if (name.Length > 36)
             {
@@ -118,11 +229,12 @@ namespace SimpleLocationDisplay
                 if (GuidRegex.IsMatch(potentialGuid))
                 {
                     string baseName = name.Substring(0, name.Length - 36);
-                    LogDebug($"Sanitized raw name from '{name}' to '{baseName}'");
+                    LogDebug($"Sanitized '{name}' to '{baseName}'");
                     return baseName.Length < 2 ? "Unknown Location" : baseName;
                 }
             }
 
+            LogDebug($"SanitizeRawName: No sanitization needed for '{name}'");
             return name.Length < 2 ? "Unknown Location" : name;
         }
 

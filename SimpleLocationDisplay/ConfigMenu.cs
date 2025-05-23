@@ -2,8 +2,6 @@
 
 namespace SimpleLocationDisplay
 {
-
-    /// <summary>The API which lets other mods add a config UI through Generic Mod Config Menu.</summary>
     public interface IGenericModConfigMenuApi
     {
         void Register(IManifest mod, Action reset, Action save, bool titleScreenOnly = false);
@@ -19,7 +17,7 @@ namespace SimpleLocationDisplay
             var configMenuApi = helper.ModRegistry.GetApi<IGenericModConfigMenuApi>("spacechase0.GenericModConfigMenu");
             if (configMenuApi == null)
             {
-                modEntry.Monitor.Log("Generic Mod Config Menu not found. Configuration UI will not be available.", LogLevel.Warn);
+                modEntry.Monitor.Log("GMCM not found; config UI unavailable.", LogLevel.Warn);
                 return;
             }
 
@@ -29,6 +27,7 @@ namespace SimpleLocationDisplay
                 {
                     config.EnableMod = true;
                     config.NotificationDuration = 3500f;
+                    config.EnableDebugLogging = false;
                 },
                 save: () => helper.WriteConfig(config),
                 titleScreenOnly: false
